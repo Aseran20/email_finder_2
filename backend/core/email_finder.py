@@ -1,29 +1,21 @@
 import smtplib
-import socket
 import dns.resolver
 import re
-import socks
-from typing import List, Optional, Tuple
-from .proxy import ProxyManager
+import time
+import os
+import random
+import string
+import socket
+from typing import List, Tuple
+from dotenv import load_dotenv
 from models import EmailFinderResponse
+
+load_dotenv()
 
 class EmailFinder:
     def __init__(self):
-        self.proxy_manager = ProxyManager()
-
-    def _configure_proxy(self):
-        proxy_config = self.proxy_manager.get_next_proxy()
-        if proxy_config and proxy_config['protocol'] == 'socks5':
-            print(f"Configuring SOCKS5 proxy: {proxy_config['host']}:{proxy_config['port']}")
-            socks.setdefaultproxy(
-                socks.SOCKS5,
-                proxy_config['host'],
-                proxy_config['port'],
-                True, # rdns
-                proxy_config['user'],
-                proxy_config['password']
-            )
-            socks.wrapmodule(smtplib)
+        self.smtp_hostname = os.getenv("SMTP_HOSTNAME", "vps.auraia.ch")
+        self.smtp_from_email = os.getenv("SMTP_FROM_EMAIL", "verify@vps.auraia.ch")
 
     def normalize_domain(self, domain: str) -> str:
         domain = domain.lower().strip()
@@ -43,57 +35,64 @@ class EmailFinder:
         return first, last
 
     def generate_patterns(self, first: str, last: str, domain: str) -> List[str]:
+        """Generate email patterns in priority order as specified."""
         patterns = []
         if first and last:
-            patterns.append(f"{first}.{last}@{domain}")
-            patterns.append(f"{first}@{domain}")
-            patterns.append(f"{last}@{domain}")
-            patterns.append(f"{first[0]}.{last}@{domain}")
-            patterns.append(f"{first}.{last[0]}@{domain}")
-            patterns.append(f"{first}{last}@{domain}")
-            patterns.append(f"{first}_{last}@{domain}")
-            patterns.append(f"{first}-{last}@{domain}")
-            patterns.append(f"{last}.{first}@{domain}")
+            # Exact order as requested: [first.last, firstlast, f.last, first.l, first, last]
+            patterns.append(f"{first}.{last}@{domain}")      # first.last
+            patterns.append(f"{first}{last}@{domain}")       # firstlast
+            patterns.append(f"{first[0]}.{last}@{domain}")   # f.last
+            patterns.append(f"{first}.{last[0]}@{domain}")   # first.l
+            patterns.append(f"{first}@{domain}")             # first
+            patterns.append(f"{last}@{domain}")              # last
         elif first:
             patterns.append(f"{first}@{domain}")
         
-        return patterns[:15] # Limit to 15
+        return patterns
 
     def get_mx_records(self, domain: str) -> List[str]:
         try:
             records = dns.resolver.resolve(domain, 'MX')
-            # Sort by preference
             sorted_records = sorted(records, key=lambda r: r.preference)
             return [str(r.exchange).rstrip('.') for r in sorted_records]
         except Exception as e:
             print(f"DNS Error: {e}")
             return []
 
-    def verify_email(self, email: str, mx_host: str) -> Tuple[bool, str]:
+    def verify_email(self, email: str, mx_host: str) -> Tuple[bool, str, int]:
         """
-        Returns (is_valid, log_message)
+        Direct SMTP verification without proxy.
+        Returns (is_valid, log_message, code)
         """
-        self._configure_proxy()
         try:
-            # SOCKS5 proxy is already configured globally via socks.wrapmodule(smtplib)
-            server = smtplib.SMTP(mx_host, 25, timeout=10)
-            server.ehlo()
+            server = smtplib.SMTP(timeout=10)
+            server.set_debuglevel(0)
             
-            # MAIL FROM
-            server.mail("test@example.com")
+            server.connect(mx_host, 25)
+            server.ehlo(self.smtp_hostname)
+            server.mail(self.smtp_from_email)
             
-            # RCPT TO
             code, message = server.rcpt(email)
             server.quit()
             
             log = f"{mx_host}: {code} {message.decode('ascii', errors='ignore')}"
             
+            # 250 = OK, 251 = User not local (will forward)
             if code == 250 or code == 251:
-                return True, log
-            return False, log
+                return True, log, code
+            return False, log, code
             
+        except socket.timeout:
+            return False, f"{mx_host}: Timeout (>10s)", 0
+        except ConnectionRefusedError:
+            return False, f"{mx_host}: Connection refused", 0
         except Exception as e:
-            return False, f"{mx_host}: Error {str(e)}"
+            return False, f"{mx_host}: Error {str(e)}", 0
+
+    def generate_random_email(self, domain: str) -> str:
+        """Generate a random email for catch-all detection."""
+        random_string = ''.join(random.choices(string.ascii_lowercase + string.digits, k=9))
+        return f"chk_{random_string}@{domain}"
 
     def find_email(self, domain: str, full_name: str) -> EmailFinderResponse:
         domain = self.normalize_domain(domain)
@@ -112,33 +111,39 @@ class EmailFinder:
             response.errorMessage = "No MX records found"
             return response
 
-        mx_host = mx_records[0] # Use primary MX
+        mx_host = mx_records[0]
         
-        # Check for catch-all
-        catch_all_email = f"zzq123invalid@{domain}"
-        is_valid, log = self.verify_email(catch_all_email, mx_host)
-        response.smtpLogs.append(f"Catch-all check: {log}")
+        # STEP 1: Catch-All Check (CRUCIAL - Must be first)
+        catch_all_email = self.generate_random_email(domain)
+        is_valid, log, code = self.verify_email(catch_all_email, mx_host)
+        response.smtpLogs.append(f"Catch-all check ({catch_all_email}): {log}")
         
         if is_valid:
+            # Server accepts all emails (Catch-All)
             response.catchAll = True
-            response.status = "unknown"
-            response.debugInfo = f"MX: {mx_host} | Catch-all detected"
-            # Best guess
+            response.status = "catch_all"
+            response.debugInfo = f"MX: {mx_host} | Catch-all detected (low confidence)"
+            # Return best guess (first.last)
             if patterns:
                 response.email = patterns[0]
             return response
 
-        # Test patterns
-        for pattern in patterns:
-            is_valid, log = self.verify_email(pattern, mx_host)
+        # STEP 2: Pattern Testing (Only if server is "Honest" - rejected catch-all)
+        for i, pattern in enumerate(patterns):
+            # Politeness: 1s delay between checks
+            if i > 0:
+                time.sleep(1)
+                
+            is_valid, log, code = self.verify_email(pattern, mx_host)
             response.smtpLogs.append(log)
             
             if is_valid:
                 response.status = "valid"
                 response.email = pattern
-                response.debugInfo = f"MX: {mx_host} | Match: {pattern}"
+                response.debugInfo = f"MX: {mx_host} | Match: {pattern} (high confidence)"
                 return response
 
+        # No match found
         response.status = "not_found"
         response.debugInfo = f"MX: {mx_host} | {len(patterns)} patterns tested | No match"
         return response
