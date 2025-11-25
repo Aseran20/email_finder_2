@@ -8,6 +8,7 @@ import string
 import socket
 from typing import List, Tuple
 from dotenv import load_dotenv
+from unidecode import unidecode
 from models import EmailFinderResponse
 
 load_dotenv()
@@ -23,32 +24,75 @@ class EmailFinder:
             domain = domain.split("://")[1].split("/")[0]
         return domain
 
-    def normalize_name(self, full_name: str) -> Tuple[str, str]:
+    def normalize_name(self, full_name: str) -> Tuple[List[str], List[str]]:
+        """
+        Normalize name and return variants to handle edge cases.
+        Returns: (first_name_variants, last_name_variants)
+        
+        Examples:
+        - "Mads-Håkon Mørck" -> (['mads-hakon', 'madshakon'], ['morck'])
+        - "André Müller" -> (['andre'], ['muller'])
+        """
         parts = full_name.strip().split()
-        first = parts[0]
+        first = parts[0] if parts else ""
         last = parts[-1] if len(parts) > 1 else ""
         
-        # Simple normalization
-        first = re.sub(r'[^a-zA-Z]', '', first).lower()
-        last = re.sub(r'[^a-zA-Z]', '', last).lower()
+        # Normalize accents using unidecode (Mørck -> Morck)
+        first_normalized = unidecode(first).lower()
+        last_normalized = unidecode(last).lower()
         
-        return first, last
+        # Remove non-alphanumeric except hyphens
+        first_cleaned = re.sub(r'[^a-z-]', '', first_normalized)
+        last_cleaned = re.sub(r'[^a-z-]', '', last_normalized)
+        
+        # Generate variants for hyphenated names
+        first_variants = [first_cleaned]
+        if '-' in first_cleaned:
+            # Add version without hyphens
+            first_variants.append(first_cleaned.replace('-', ''))
+        
+        last_variants = [last_cleaned]
+        if '-' in last_cleaned:
+            last_variants.append(last_cleaned.replace('-', ''))
+        
+        return first_variants, last_variants
 
-    def generate_patterns(self, first: str, last: str, domain: str) -> List[str]:
-        """Generate email patterns in priority order as specified."""
+    def generate_patterns(self, first_variants: List[str], last_variants: List[str], domain: str) -> List[str]:
+        """
+        Generate email patterns with enhanced coverage.
+        Handles name variants (hyphenated, accented) and missing permutations.
+        """
         patterns = []
-        if first and last:
-            # Exact order as requested: [first.last, firstlast, f.last, first.l, first, last]
-            patterns.append(f"{first}.{last}@{domain}")      # first.last
-            patterns.append(f"{first}{last}@{domain}")       # firstlast
-            patterns.append(f"{first[0]}.{last}@{domain}")   # f.last
-            patterns.append(f"{first}.{last[0]}@{domain}")   # first.l
-            patterns.append(f"{first}@{domain}")             # first
-            patterns.append(f"{last}@{domain}")              # last
-        elif first:
-            patterns.append(f"{first}@{domain}")
         
-        return patterns
+        # Generate patterns for all variant combinations
+        for first in first_variants:
+            for last in last_variants:
+                if first and last:
+                    # Original patterns (priority order)
+                    patterns.append(f"{first}.{last}@{domain}")        # john.doe@
+                    patterns.append(f"{first}{last}@{domain}")          # johndoe@
+                    patterns.append(f"{first[0]}.{last}@{domain}")     # j.doe@
+                    patterns.append(f"{first}.{last[0]}@{domain}")     # john.d@
+                    patterns.append(f"{first}@{domain}")                # john@
+                    patterns.append(f"{last}@{domain}")                 # doe@
+                    
+                    # NEW: Missing permutations (Edge Case #2)
+                    patterns.append(f"{first[0]}{last}@{domain}")      # jdoe@
+                    patterns.append(f"{last}{first[0]}@{domain}")      # doej@
+                    patterns.append(f"{first}{last[0]}@{domain}")      # johnd@
+                    
+                elif first:
+                    patterns.append(f"{first}@{domain}")
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_patterns = []
+        for p in patterns:
+            if p not in seen:
+                seen.add(p)
+                unique_patterns.append(p)
+        
+        return unique_patterns
 
     def get_mx_records(self, domain: str) -> List[str]:
         try:
@@ -96,8 +140,8 @@ class EmailFinder:
 
     def find_email(self, domain: str, full_name: str) -> EmailFinderResponse:
         domain = self.normalize_domain(domain)
-        first, last = self.normalize_name(full_name)
-        patterns = self.generate_patterns(first, last, domain)
+        first_variants, last_variants = self.normalize_name(full_name)
+        patterns = self.generate_patterns(first_variants, last_variants, domain)
         mx_records = self.get_mx_records(domain)
         
         response = EmailFinderResponse(

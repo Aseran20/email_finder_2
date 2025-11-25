@@ -1,12 +1,18 @@
 import { useState } from 'react';
 import { SearchForm } from './components/SearchForm';
 import { HistoryList } from './components/HistoryList';
+import { BulkSearch } from './components/BulkSearch';
 import type { EmailFinderRequest, HistoryItem, EmailFinderResponse } from './types';
-import { Mail } from 'lucide-react';
+import { Mail, Search, FileSpreadsheet } from 'lucide-react';
+
+type TabType = 'single' | 'bulk';
 
 function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabType>('single');
+
+  const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
   const handleSearch = async (request: EmailFinderRequest) => {
     const newId = Date.now().toString();
@@ -26,7 +32,7 @@ function App() {
     setIsLoading(true);
 
     try {
-      const response = await fetch('http://localhost:8000/api/find-email', {
+      const response = await fetch(`${apiUrl}/api/find-email`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -60,28 +66,58 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <div className="bg-blue-600 p-2 rounded-lg">
               <Mail className="w-6 h-6 text-white" />
             </div>
-            <h1 className="text-xl font-bold text-gray-900">Email Finder <span className="text-xs font-normal text-gray-500 ml-2">Internal MVP</span></h1>
+            <h1 className="text-xl font-bold text-gray-900">
+              Email Finder <span className="text-xs font-normal text-gray-500 ml-2">Internal MVP</span>
+            </h1>
+          </div>
+
+          {/* Tabs */}
+          <div className="flex space-x-2">
+            <button
+              onClick={() => setActiveTab('single')}
+              className={`flex items-center px-4 py-2 rounded-md font-medium transition-colors ${activeTab === 'single'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+            >
+              <Search className="w-4 h-4 mr-2" />
+              Single Search
+            </button>
+            <button
+              onClick={() => setActiveTab('bulk')}
+              className={`flex items-center px-4 py-2 rounded-md font-medium transition-colors ${activeTab === 'bulk'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+            >
+              <FileSpreadsheet className="w-4 h-4 mr-2" />
+              Bulk Search
+            </button>
           </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-[calc(100vh-8rem)]">
-          {/* Left Column - Search Form */}
-          <div className="lg:col-span-4">
-            <SearchForm onSearch={handleSearch} isLoading={isLoading} />
-          </div>
+        {activeTab === 'single' ? (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-[calc(100vh-8rem)]">
+            {/* Left Column - Search Form */}
+            <div className="lg:col-span-4">
+              <SearchForm onSearch={handleSearch} isLoading={isLoading} />
+            </div>
 
-          {/* Right Column - History */}
-          <div className="lg:col-span-8 h-full overflow-hidden">
-            <HistoryList history={history} />
+            {/* Right Column - History */}
+            <div className="lg:col-span-8 h-full overflow-hidden">
+              <HistoryList history={history} />
+            </div>
           </div>
-        </div>
+        ) : (
+          <BulkSearch apiUrl={apiUrl} />
+        )}
       </main>
     </div>
   );

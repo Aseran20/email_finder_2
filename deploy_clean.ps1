@@ -18,6 +18,7 @@ Write-Host "Copying essential files..." -ForegroundColor Cyan
 Copy-Item -Path "backend\core" -Destination "$tempDir\core" -Recurse
 Copy-Item -Path "backend\main.py" -Destination "$tempDir\"
 Copy-Item -Path "backend\models.py" -Destination "$tempDir\"
+Copy-Item -Path "backend\database.py" -Destination "$tempDir\"
 Copy-Item -Path "backend\requirements.txt" -Destination "$tempDir\"
 Copy-Item -Path "backend\.env" -Destination "$tempDir\"
 

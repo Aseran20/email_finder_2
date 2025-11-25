@@ -3,3 +3,9 @@ uvicorn
 dnspython
 pydantic
 python-dotenv
+unidecode
+sqlalchemy
+aiosqlite
+pandas
+python-multipart
+openpyxl
