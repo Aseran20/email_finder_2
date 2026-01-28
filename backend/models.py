@@ -5,6 +5,17 @@ class EmailFinderRequest(BaseModel):
     domain: str
     fullName: str # Made required
 
+class CheckEmailRequest(BaseModel):
+    email: str
+    fullName: Optional[str] = None  # Optional for fallback search
+
+class BulkSearchItem(BaseModel):
+    domain: str
+    fullName: str
+
+class BulkSearchJsonRequest(BaseModel):
+    searches: List[BulkSearchItem]
+
 class EmailFinderResponse(BaseModel):
     status: str
     email: Optional[str] = None

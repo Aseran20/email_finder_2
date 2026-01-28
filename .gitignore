@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+
+# Environment
+.env
+*.env.local
+.env.production
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+nohup.out
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Deployment
+deploy.zip
+deploy.tar.gz
+backend_clean/
+*.tar.gz
+
+# Temporary
+nul
+tmp/
+temp/
+*.tmp
+
+# Archives (old session notes, experiments)
+archives/
+
+# Node (frontend)
+node_modules/
+dist/
+build/
+.cache/

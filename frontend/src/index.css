@@ -1,9 +1,160 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
+  :root {
+    /* Monochrome base with sophisticated grays */
+    --background: 0 0% 100%;
+    --foreground: 224 8% 12%;
+
+    /* Card system with subtle elevation */
+    --card: 0 0% 100%;
+    --card-foreground: 224 8% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 224 8% 12%;
+
+    /* Refined indigo as primary - sophisticated, trustworthy */
+    --primary: 239 62% 52%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Secondary: warm gray with subtle warmth */
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 224 8% 12%;
+
+    /* Muted: for subtle backgrounds and disabled states */
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+
+    /* Accent: slightly warmer than secondary for hover states */
+    --accent: 220 14% 93%;
+    --accent-foreground: 224 8% 12%;
+
+    /* Destructive: refined red, not alarming */
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Borders: very subtle, almost invisible */
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 239 62% 52%;
+
+    --radius: 0.5rem;
+
+    /* Custom variables for status colors */
+    --success: 142 76% 36%;
+    --success-bg: 138 76% 97%;
+    --warning: 38 92% 50%;
+    --warning-bg: 48 96% 95%;
+    --info: 199 89% 48%;
+    --info-bg: 204 94% 94%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
   body {
-    @apply bg-gray-50 text-gray-900;
+    @apply bg-background text-foreground;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Typography refinements */
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display;
+    font-variation-settings: 'wght' 600, 'opsz' 72;
+    letter-spacing: -0.02em;
+  }
+
+  /* Monospace for all data/technical content */
+  code, pre, [data-mono] {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-variant-ligatures: none;
+  }
+
+  /* Smooth animations */
+  * {
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* Focus states */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* Selection color */
+  ::selection {
+    background: hsl(var(--primary) / 0.15);
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer components {
+  /* Status badge variants with refined colors */
+  .badge-success {
+    @apply bg-[hsl(var(--success-bg))] text-[hsl(var(--success))] border-[hsl(var(--success))]/20;
+  }
+
+  .badge-warning {
+    @apply bg-[hsl(var(--warning-bg))] text-[hsl(var(--warning))] border-[hsl(var(--warning))]/20;
+  }
+
+  .badge-error {
+    @apply bg-destructive/10 text-destructive border-destructive/20;
+  }
+
+  .badge-info {
+    @apply bg-[hsl(var(--info-bg))] text-[hsl(var(--info))] border-[hsl(var(--info))]/20;
+  }
+
+  /* Refined data table styling */
+  .data-table {
+    @apply font-mono text-sm;
+  }
+
+  /* Elevation system */
+  .elevation-1 {
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  }
+
+  .elevation-2 {
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.07);
+  }
+
+  .elevation-3 {
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.08);
+  }
+}
+
+@layer utilities {
+  /* Animation utilities */
+  .animate-in {
+    animation: fadeIn 0.3s ease-out;
+  }
+
+  .delay-75 {
+    animation-delay: 75ms;
+  }
+
+  .delay-150 {
+    animation-delay: 150ms;
+  }
+
+  .delay-225 {
+    animation-delay: 225ms;
+  }
+
+  /* Spacing utilities for generous layouts */
+  .section-spacing {
+    @apply py-12 px-6;
+  }
+
+  .content-spacing {
+    @apply space-y-8;
   }
 }

@@ -4,13 +4,11 @@ import { HistoryList } from './components/HistoryList';
 import { BulkSearch } from './components/BulkSearch';
 import type { EmailFinderRequest, HistoryItem, EmailFinderResponse } from './types';
 import { Mail, Search, FileSpreadsheet } from 'lucide-react';
-
-type TabType = 'single' | 'bulk';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabType>('single');
 
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -63,61 +61,110 @@ function App() {
     }
   };
 
-  return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="bg-blue-600 p-2 rounded-lg">
-              <Mail className="w-6 h-6 text-white" />
-            </div>
-            <h1 className="text-xl font-bold text-gray-900">
-              Email Finder <span className="text-xs font-normal text-gray-500 ml-2">Internal MVP</span>
-            </h1>
-          </div>
+  const handleDelete = (id: string) => {
+    setHistory(prev => prev.filter(item => item.id !== id));
+  };
 
-          {/* Tabs */}
-          <div className="flex space-x-2">
-            <button
-              onClick={() => setActiveTab('single')}
-              className={`flex items-center px-4 py-2 rounded-md font-medium transition-colors ${activeTab === 'single'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-            >
-              <Search className="w-4 h-4 mr-2" />
-              Single Search
-            </button>
-            <button
-              onClick={() => setActiveTab('bulk')}
-              className={`flex items-center px-4 py-2 rounded-md font-medium transition-colors ${activeTab === 'bulk'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-            >
-              <FileSpreadsheet className="w-4 h-4 mr-2" />
-              Bulk Search
-            </button>
+  const handleCheckEmail = async (email: string, fullName?: string) => {
+    const newId = Date.now().toString();
+    const tempItem: HistoryItem = {
+      id: newId,
+      date: new Date().toISOString(),
+      request: {
+        domain: email.split('@')[1] || email,
+        fullName: fullName || email
+      },
+      status: 'searching',
+      patternsTested: [],
+      smtpLogs: [],
+      catchAll: false,
+      mxRecords: [],
+      debugInfo: 'Checking email...',
+    };
+
+    setHistory(prev => [tempItem, ...prev]);
+    setIsLoading(true);
+
+    try {
+      const response = await fetch(`${apiUrl}/api/check-email`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email, fullName }),
+      });
+
+      const data: EmailFinderResponse = await response.json();
+
+      setHistory(prev => prev.map(item =>
+        item.id === newId
+          ? { ...item, ...data, status: data.status as HistoryItem['status'] }
+          : item
+      ));
+    } catch (error) {
+      setHistory(prev => prev.map(item =>
+        item.id === newId
+          ? {
+            ...item,
+            status: 'error',
+            errorMessage: error instanceof Error ? error.message : 'Network error',
+            debugInfo: 'Failed to connect to backend'
+          }
+          : item
+      ));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-background">
+      <header className="border-b border-border/40 sticky top-0 z-10 bg-background/80 backdrop-blur-md">
+        <div className="max-w-7xl mx-auto px-8 h-20 flex items-center justify-between">
+          <div className="flex items-center space-x-4">
+            <div className="flex items-center justify-center w-12 h-12 rounded-lg bg-primary/10">
+              <Mail className="w-6 h-6 text-primary" />
+            </div>
+            <div>
+              <h1 className="font-display text-2xl font-semibold tracking-tight">
+                Email Finder
+              </h1>
+              <p className="text-xs text-muted-foreground font-mono">
+                SMTP Verification Tool
+              </p>
+            </div>
           </div>
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
-        {activeTab === 'single' ? (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-[calc(100vh-8rem)]">
-            {/* Left Column - Search Form */}
-            <div className="lg:col-span-4">
-              <SearchForm onSearch={handleSearch} isLoading={isLoading} />
-            </div>
+      <main className="max-w-7xl mx-auto px-8 py-12">
+        <Tabs defaultValue="single" className="w-full">
+          <TabsList className="mb-8">
+            <TabsTrigger value="single" className="font-mono">
+              <Search className="w-4 h-4 mr-2" />
+              Single Search
+            </TabsTrigger>
+            <TabsTrigger value="bulk" className="font-mono">
+              <FileSpreadsheet className="w-4 h-4 mr-2" />
+              Bulk Search
+            </TabsTrigger>
+          </TabsList>
 
-            {/* Right Column - History */}
-            <div className="lg:col-span-8 h-full overflow-hidden">
-              <HistoryList history={history} />
+          <TabsContent value="single" className="animate-in">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+              <div className="lg:col-span-4">
+                <SearchForm onSearch={handleSearch} onCheckEmail={handleCheckEmail} isLoading={isLoading} />
+              </div>
+              <div className="lg:col-span-8">
+                <HistoryList history={history} onDelete={handleDelete} />
+              </div>
             </div>
-          </div>
-        ) : (
-          <BulkSearch apiUrl={apiUrl} />
-        )}
+          </TabsContent>
+
+          <TabsContent value="bulk" className="animate-in">
+            <BulkSearch apiUrl={apiUrl} />
+          </TabsContent>
+        </Tabs>
       </main>
     </div>
   );

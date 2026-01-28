@@ -10,13 +10,24 @@ from typing import List, Tuple
 from dotenv import load_dotenv
 from unidecode import unidecode
 from models import EmailFinderResponse
+from core.mx_cache import MXCache
+from core.logger import StructuredLogger
+from config import config
 
 load_dotenv()
+logger = StructuredLogger("email_finder", json_format=False)
 
 class EmailFinder:
-    def __init__(self):
-        self.smtp_hostname = os.getenv("SMTP_HOSTNAME", "vps.auraia.ch")
-        self.smtp_from_email = os.getenv("SMTP_FROM_EMAIL", "verify@vps.auraia.ch")
+    def __init__(self, mx_cache_ttl: int = None):
+        """
+        Initialize EmailFinder with optional MX cache.
+
+        Args:
+            mx_cache_ttl: MX cache TTL in seconds (default: from config)
+        """
+        self.smtp_hostname = config.SMTP_HOSTNAME
+        self.smtp_from_email = config.SMTP_FROM_EMAIL
+        self.mx_cache = MXCache(ttl=mx_cache_ttl or config.MX_CACHE_TTL)
 
     def normalize_domain(self, domain: str) -> str:
         domain = domain.lower().strip()
@@ -95,12 +106,32 @@ class EmailFinder:
         return unique_patterns
 
     def get_mx_records(self, domain: str) -> List[str]:
+        """
+        Get MX records for a domain with caching.
+
+        Args:
+            domain: Domain name
+
+        Returns:
+            List of MX hostnames, sorted by preference
+        """
+        # Check cache first
+        cached = self.mx_cache.get(domain)
+        if cached is not None:
+            return cached
+
+        # Cache miss - query DNS
         try:
             records = dns.resolver.resolve(domain, 'MX')
             sorted_records = sorted(records, key=lambda r: r.preference)
-            return [str(r.exchange).rstrip('.') for r in sorted_records]
+            mx_list = [str(r.exchange).rstrip('.') for r in sorted_records]
+
+            # Store in cache
+            self.mx_cache.set(domain, mx_list)
+            return mx_list
+
         except Exception as e:
-            print(f"DNS Error: {e}")
+            logger.error("DNS query failed", domain=domain, error=str(e))
             return []
 
     def verify_email(self, email: str, mx_host: str) -> Tuple[bool, str, int]:
@@ -133,6 +164,54 @@ class EmailFinder:
         except Exception as e:
             return False, f"{mx_host}: Error {str(e)}", 0
 
+    def verify_email_with_retry(self, email: str, mx_host: str) -> Tuple[bool, str, int]:
+        """
+        Verify email with retry logic and exponential backoff.
+
+        Retries on transient errors (timeout, connection issues) but NOT on
+        permanent failures like 550 (user not found).
+
+        Retry strategy: 1s → 2s → 4s (max 3 attempts total)
+
+        Args:
+            email: Email address to verify
+            mx_host: MX server hostname
+
+        Returns:
+            Tuple of (is_valid, log_message, smtp_code)
+        """
+        last_error = None
+
+        for attempt in range(config.SMTP_MAX_RETRIES):
+            is_valid, log, code = self.verify_email(email, mx_host)
+
+            # Success - return immediately
+            if is_valid:
+                if attempt > 0:
+                    log += f" (succeeded after {attempt + 1} attempts)"
+                return is_valid, log, code
+
+            # Check if error is transient and should be retried
+            should_retry = config.should_retry_error(log)
+
+            if not should_retry:
+                # Permanent error (like 550 user not found) - don't retry
+                logger.debug(f"Permanent error, not retrying: {log}")
+                return is_valid, log, code
+
+            # Transient error - retry
+            last_error = (is_valid, log, code)
+
+            if attempt < config.SMTP_MAX_RETRIES - 1:
+                delay = config.get_retry_delay(attempt)
+                logger.info(f"Transient error, retrying in {delay}s (attempt {attempt + 1}/{config.SMTP_MAX_RETRIES}): {log}")
+                time.sleep(delay)
+
+        # All retries exhausted
+        is_valid, log, code = last_error
+        log += f" (failed after {config.SMTP_MAX_RETRIES} attempts)"
+        return is_valid, log, code
+
     def generate_random_email(self, domain: str) -> str:
         """Generate a random email for catch-all detection."""
         random_string = ''.join(random.choices(string.ascii_lowercase + string.digits, k=9))
@@ -143,7 +222,7 @@ class EmailFinder:
         first_variants, last_variants = self.normalize_name(full_name)
         patterns = self.generate_patterns(first_variants, last_variants, domain)
         mx_records = self.get_mx_records(domain)
-        
+
         response = EmailFinderResponse(
             status="unknown",
             patternsTested=patterns,
@@ -155,21 +234,47 @@ class EmailFinder:
             response.errorMessage = "No MX records found"
             return response
 
-        mx_host = mx_records[0]
-        
+        # Try up to MAX_MX_SERVERS MX records with fallback
+        mx_hosts_to_try = mx_records[:config.MAX_MX_SERVERS]
+        mx_host = None
+        connection_errors = []
+
         # STEP 1: Catch-All Check (CRUCIAL - Must be first)
         catch_all_email = self.generate_random_email(domain)
-        is_valid, log, code = self.verify_email(catch_all_email, mx_host)
-        response.smtpLogs.append(f"Catch-all check ({catch_all_email}): {log}")
-        
-        if is_valid:
-            # Server accepts all emails (Catch-All)
-            response.catchAll = True
-            response.status = "catch_all"
-            response.debugInfo = f"MX: {mx_host} | Catch-all detected (low confidence)"
-            # Return best guess (first.last)
-            if patterns:
-                response.email = patterns[0]
+
+        for idx, mx in enumerate(mx_hosts_to_try):
+            is_valid, log, code = self.verify_email_with_retry(catch_all_email, mx)
+            response.smtpLogs.append(f"Catch-all check ({catch_all_email}) on MX{idx + 1} ({mx}): {log}")
+
+            # Check if it's a connection error (should try next MX)
+            is_connection_error = any(err in log.lower() for err in [
+                "timeout", "connection refused", "connection reset", "connection closed"
+            ])
+
+            if is_connection_error:
+                connection_errors.append(f"MX{idx + 1} ({mx}): {log}")
+                continue  # Try next MX
+
+            # Got a response (valid or invalid) - use this MX
+            mx_host = mx
+
+            if is_valid:
+                # Server accepts all emails (Catch-All)
+                response.catchAll = True
+                response.status = "catch_all"
+                response.debugInfo = f"MX: {mx_host} | Catch-all detected (low confidence)"
+                # Return best guess (first.last)
+                if patterns:
+                    response.email = patterns[0]
+                return response
+
+            # Catch-all rejected - proceed to pattern testing with this MX
+            break
+
+        # If all MX servers had connection errors
+        if mx_host is None:
+            response.status = "error"
+            response.errorMessage = f"All MX servers unreachable: {'; '.join(connection_errors)}"
             return response
 
         # STEP 2: Pattern Testing (Only if server is "Honest" - rejected catch-all)
@@ -177,10 +282,10 @@ class EmailFinder:
             # Politeness: 1s delay between checks
             if i > 0:
                 time.sleep(1)
-                
-            is_valid, log, code = self.verify_email(pattern, mx_host)
+
+            is_valid, log, code = self.verify_email_with_retry(pattern, mx_host)
             response.smtpLogs.append(log)
-            
+
             if is_valid:
                 response.status = "valid"
                 response.email = pattern
@@ -190,4 +295,101 @@ class EmailFinder:
         # No match found
         response.status = "not_found"
         response.debugInfo = f"MX: {mx_host} | {len(patterns)} patterns tested | No match"
+        return response
+
+    def check_email(self, email: str, full_name: str = None) -> EmailFinderResponse:
+        """
+        Check if a specific email address is valid.
+        If invalid and fullName is provided, fallback to domain search.
+
+        Args:
+            email: Email address to verify
+            full_name: Optional full name for fallback search
+
+        Returns:
+            EmailFinderResponse with validation result
+        """
+        # Extract domain from email
+        if '@' not in email:
+            response = EmailFinderResponse(status="error", errorMessage="Invalid email format")
+            return response
+
+        domain = email.split('@')[1]
+        domain = self.normalize_domain(domain)
+
+        # Get MX records
+        mx_records = self.get_mx_records(domain)
+        response = EmailFinderResponse(
+            status="unknown",
+            patternsTested=[email],
+            mxRecords=mx_records
+        )
+
+        if not mx_records:
+            response.status = "error"
+            response.errorMessage = "No MX records found"
+            return response
+
+        # Try up to MAX_MX_SERVERS MX records with fallback
+        mx_hosts_to_try = mx_records[:config.MAX_MX_SERVERS]
+        mx_host = None
+
+        for idx, mx in enumerate(mx_hosts_to_try):
+            is_valid, log, code = self.verify_email_with_retry(email, mx)
+            response.smtpLogs.append(f"Direct check ({email}) on MX{idx + 1} ({mx}): {log}")
+
+            # Check if it's a connection error (should try next MX)
+            is_connection_error = any(err in log.lower() for err in [
+                "timeout", "connection refused", "connection reset", "connection closed"
+            ])
+
+            if is_connection_error:
+                continue  # Try next MX
+
+            # Got a response (valid or invalid) - use this result
+            mx_host = mx
+
+            if is_valid:
+                response.status = "valid"
+                response.email = email
+                response.debugInfo = f"MX: {mx_host} | Email verified directly (high confidence)"
+                return response
+
+            # Email is invalid - break to proceed to fallback
+            break
+
+        # If all MX servers had connection errors
+        if mx_host is None:
+            response.status = "error"
+            response.errorMessage = "All MX servers unreachable"
+            return response
+
+        # Email is invalid
+        # If fullName provided, try fallback domain search
+        if full_name:
+            logger.info(f"Email {email} invalid, attempting fallback search with name: {full_name}")
+            response.smtpLogs.append(f"Fallback: Trying domain search with name '{full_name}'")
+
+            fallback_response = self.find_email(domain, full_name)
+
+            # Merge logs and info
+            response.smtpLogs.extend(fallback_response.smtpLogs)
+            response.patternsTested.extend(fallback_response.patternsTested)
+            response.catchAll = fallback_response.catchAll
+
+            if fallback_response.status == "valid":
+                response.status = "valid"
+                response.email = fallback_response.email
+                response.debugInfo = f"Fallback success: Found {fallback_response.email}"
+            elif fallback_response.status == "catch_all":
+                response.status = "catch_all"
+                response.email = fallback_response.email
+                response.debugInfo = fallback_response.debugInfo + " (via fallback)"
+            else:
+                response.status = "not_found"
+                response.debugInfo = f"Email {email} invalid, fallback search found no alternatives"
+        else:
+            response.status = "not_found"
+            response.debugInfo = f"MX: {mx_host} | Email {email} does not exist"
+
         return response

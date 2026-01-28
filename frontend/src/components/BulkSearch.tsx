@@ -1,5 +1,9 @@
 import React, { useState } from 'react';
-import { Upload, FileSpreadsheet, Loader2, Download, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
+import { Loader2, Download, Copy, Check, FileSpreadsheet } from 'lucide-react';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Label } from '@/components/ui/label';
 
 interface BulkResult {
     domain: string;
@@ -10,41 +14,129 @@ interface BulkResult {
     debugInfo: string;
 }
 
+interface ParsedRow {
+    fullName: string;
+    domain: string;
+}
+
 interface BulkSearchProps {
     apiUrl: string;
 }
 
-export const BulkSearch: React.FC<BulkSearchProps> = ({ apiUrl }) => {
-    const [file, setFile] = useState<File | null>(null);
-    const [searchName, setSearchName] = useState<string>('');
-    const [isProcessing, setIsProcessing] = useState(false);
-    const [results, setResults] = useState<BulkResult[]>([]);
+const CopyButton: React.FC<{ text: string }> = ({ text }) => {
+    const [copied, setCopied] = React.useState(false);
 
-    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files[0]) {
-            const selectedFile = e.target.files[0];
-            setFile(selectedFile);
-            setResults([]);
-            setSearchName(selectedFile.name.replace(/\.(csv|xlsx|xls)$/, ''));
+    const handleCopy = async () => {
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch (err) {
+            console.error('Failed to copy:', err);
         }
     };
 
+    return (
+        <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={handleCopy}
+        >
+            {copied ? (
+                <Check className="w-3.5 h-3.5 text-success" />
+            ) : (
+                <Copy className="w-3.5 h-3.5" />
+            )}
+        </Button>
+    );
+};
+
+export const BulkSearch: React.FC<BulkSearchProps> = ({ apiUrl }) => {
+    const [pastedData, setPastedData] = useState<string>('');
+    const [parsedRows, setParsedRows] = useState<ParsedRow[]>([]);
+    const [isProcessing, setIsProcessing] = useState(false);
+    const [results, setResults] = useState<BulkResult[]>([]);
+
+    const parsePastedData = (text: string): ParsedRow[] => {
+        if (!text.trim()) {
+            return [];
+        }
+
+        // Split by lines
+        const lines = text.trim().split('\n').filter(line => line.trim());
+
+        if (lines.length === 0) return [];
+
+        // Detect delimiter (tab or comma)
+        const firstLine = lines[0];
+        const delimiter = firstLine.includes('\t') ? '\t' : ',';
+
+        // Parse each line
+        const rows = lines.map(line => {
+            const cols = line.split(delimiter).map(c => c.trim());
+
+            // Accept 2 columns (Full Name, Domain) or 3 (First, Last, Domain)
+            if (cols.length === 2) {
+                return { fullName: cols[0], domain: cols[1] };
+            } else if (cols.length === 3) {
+                return { fullName: `${cols[0]} ${cols[1]}`, domain: cols[2] };
+            }
+            return null;
+        }).filter(Boolean) as ParsedRow[];
+
+        // Skip first line if it's a header
+        const firstRow = rows[0];
+        const hasHeader = firstRow && (
+            firstRow.domain.toLowerCase().includes('domain') ||
+            firstRow.fullName.toLowerCase().includes('name')
+        );
+
+        return hasHeader ? rows.slice(1) : rows;
+    };
+
+    const handlePasteChange = (text: string) => {
+        setPastedData(text);
+        const parsed = parsePastedData(text);
+        setParsedRows(parsed);
+        setResults([]); // Clear previous results
+    };
+
+    const downloadTemplate = () => {
+        const template = `Full Name,Domain
+John Doe,company.com
+Jane Smith,example.com`;
+
+        const blob = new Blob([template], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'bulk_search_template.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
     const handleProcess = async () => {
-        if (!file) {
-            alert('Please upload a file');
+        if (parsedRows.length === 0) {
+            alert('Please paste some data first');
             return;
         }
 
         setIsProcessing(true);
         setResults([]);
 
-        const formData = new FormData();
-        formData.append('file', file);
-
         try {
-            const response = await fetch(`${apiUrl}/api/bulk-search`, {
+            const response = await fetch(`${apiUrl}/api/bulk-search-json`, {
                 method: 'POST',
-                body: formData,
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    searches: parsedRows.map(row => ({
+                        domain: row.domain,
+                        fullName: row.fullName
+                    }))
+                }),
             });
 
             const data = await response.json();
@@ -52,7 +144,7 @@ export const BulkSearch: React.FC<BulkSearchProps> = ({ apiUrl }) => {
             if (response.ok) {
                 setResults(data.results || []);
             } else {
-                alert(`Error: ${data.detail || 'Upload failed'}`);
+                alert(`Error: ${data.detail || 'Processing failed'}`);
             }
         } catch (error) {
             alert(`Network error: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -83,145 +175,179 @@ export const BulkSearch: React.FC<BulkSearchProps> = ({ apiUrl }) => {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${searchName || 'bulk_results'}_${new Date().toISOString().split('T')[0]}.csv`;
+        a.download = `bulk_results_${new Date().toISOString().split('T')[0]}.csv`;
         a.click();
+        URL.revokeObjectURL(url);
     };
 
-    const getStatusIcon = (status: string) => {
-        switch (status) {
-            case 'valid':
-                return <CheckCircle className="w-5 h-5 text-green-600" />;
-            case 'not_found':
-                return <XCircle className="w-5 h-5 text-gray-400" />;
-            case 'catch_all':
-                return <AlertCircle className="w-5 h-5 text-yellow-600" />;
-            default:
-                return <XCircle className="w-5 h-5 text-red-600" />;
-        }
+    const getStatusBadge = (status: string) => {
+        const config = {
+            valid: { className: "badge-success" },
+            not_found: { className: "bg-muted text-muted-foreground" },
+            catch_all: { className: "badge-warning" },
+            error: { className: "badge-error" }
+        };
+
+        const statusKey = status === 'catch_all' ? 'catch_all' : status === 'valid' ? 'valid' : status === 'not_found' ? 'not_found' : 'error';
+        const { className } = config[statusKey];
+
+        return (
+            <Badge className={`${className} font-mono`}>
+                {status.toUpperCase().replace('_', ' ')}
+            </Badge>
+        );
     };
 
     return (
         <div className="space-y-6">
-            <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-                <h2 className="text-xl font-semibold mb-4 text-gray-800">Bulk Email Search</h2>
-
-                <div className="space-y-4">
-                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-500 transition-colors">
-                        <input
-                            type="file"
-                            accept=".csv,.xlsx"
-                            onChange={handleFileChange}
-                            className="hidden"
-                            id="file-upload"
+            <Card className="elevation-2 animate-in">
+                <CardHeader className="space-y-3">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <CardTitle>Bulk Verification</CardTitle>
+                            <CardDescription className="font-mono text-xs mt-1">
+                                Paste data from Excel/Sheets for batch SMTP validation
+                            </CardDescription>
+                        </div>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={downloadTemplate}
+                            className="font-mono"
+                        >
+                            <Download className="w-4 h-4 mr-2" />
+                            CSV Template
+                        </Button>
+                    </div>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                    <div className="space-y-2">
+                        <Label htmlFor="bulkData" className="text-sm">
+                            Paste from Spreadsheet
+                        </Label>
+                        <textarea
+                            id="bulkData"
+                            value={pastedData}
+                            onChange={(e) => handlePasteChange(e.target.value)}
+                            placeholder="Full Name	Domain
+John Doe	company.com
+Jane Smith	example.com"
+                            className="w-full min-h-[200px] px-3 py-2 text-sm font-mono border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-ring resize-y"
                             disabled={isProcessing}
                         />
-                        <label htmlFor="file-upload" className="cursor-pointer">
-                            <FileSpreadsheet className="w-12 h-12 mx-auto mb-3 text-gray-400" />
-                            {file ? (
-                                <p className="text-sm font-medium text-gray-700">{file.name}</p>
-                            ) : (
-                                <>
-                                    <p className="text-sm font-medium text-gray-700">Click to upload CSV or Excel</p>
-                                    <p className="text-xs text-gray-500 mt-1">File must have columns: Name, Domain</p>
-                                </>
-                            )}
-                        </label>
+                        <p className="text-xs text-muted-foreground font-mono">
+                            Paste from Excel (tab-separated) or CSV (comma-separated)
+                        </p>
                     </div>
 
-                    {file && (
-                        <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
-                            <p className="text-sm text-blue-800 mb-2"><strong>Column names required:</strong></p>
-                            <ul className="text-xs text-blue-700 space-y-1 ml-4 list-disc">
-                                <li><code className="bg-white px-1">Name</code> or <code className="bg-white px-1">fullName</code></li>
-                                <li><code className="bg-white px-1">Domain</code></li>
-                            </ul>
+                    {parsedRows.length > 0 && (
+                        <div className="bg-info/10 border border-info/20 rounded-md p-4">
+                            <div className="flex items-center justify-between mb-2">
+                                <p className="text-sm font-medium text-info">
+                                    ✓ {parsedRows.length} rows detected
+                                </p>
+                                <FileSpreadsheet className="w-4 h-4 text-info" />
+                            </div>
+                            <div className="text-xs text-info/80 space-y-1 font-mono">
+                                {parsedRows.slice(0, 3).map((row, i) => (
+                                    <div key={i} className="truncate">
+                                        {row.fullName} @ {row.domain}
+                                    </div>
+                                ))}
+                                {parsedRows.length > 3 && (
+                                    <div className="text-info/60">
+                                        ... and {parsedRows.length - 3} more
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     )}
 
-                    <button
+                    <Button
                         onClick={handleProcess}
-                        disabled={!file || isProcessing}
-                        className={`w-full flex items-center justify-center py-3 px-4 rounded-md text-white font-medium transition-all ${!file || isProcessing
-                                ? 'bg-blue-400 cursor-not-allowed'
-                                : 'bg-blue-600 hover:bg-blue-700 shadow-md hover:shadow-lg'
-                            }`}
+                        disabled={parsedRows.length === 0 || isProcessing}
+                        className="w-full font-mono"
                     >
                         {isProcessing ? (
                             <>
-                                <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                                Processing... (1s delay per row)
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                Processing... ({parsedRows.length} rows, 1s per row)
                             </>
                         ) : (
                             <>
-                                <Upload className="w-5 h-5 mr-2" />
-                                Start Processing
+                                <FileSpreadsheet className="w-4 h-4 mr-2" />
+                                Start Processing ({parsedRows.length} rows)
                             </>
                         )}
-                    </button>
-                </div>
-            </div>
+                    </Button>
+                </CardContent>
+            </Card>
 
             {results.length > 0 && (
-                <div className="bg-white rounded-lg shadow-sm border border-gray-200">
-                    <div className="p-6 border-b border-gray-200 flex justify-between items-center">
+                <Card className="elevation-2 animate-in">
+                    <CardHeader className="flex-row items-center justify-between space-y-0 pb-4">
                         <div>
-                            <h3 className="text-lg font-semibold text-gray-800">Results ({results.length})</h3>
-                            <p className="text-sm text-gray-500 mt-1">
-                                {results.filter(r => r.status === 'valid').length} valid, {' '}
-                                {results.filter(r => r.status === 'not_found').length} not found, {' '}
+                            <CardTitle className="text-xl">Results ({results.length})</CardTitle>
+                            <p className="text-sm text-muted-foreground mt-1 font-mono">
+                                {results.filter(r => r.status === 'valid').length} valid · {' '}
+                                {results.filter(r => r.status === 'not_found').length} not found · {' '}
                                 {results.filter(r => r.status === 'catch_all').length} catch-all
                             </p>
                         </div>
-                        <button
+                        <Button
                             onClick={exportToCSV}
-                            className="flex items-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
+                            variant="outline"
+                            className="font-mono"
                         >
                             <Download className="w-4 h-4 mr-2" />
                             Export CSV
-                        </button>
-                    </div>
+                        </Button>
+                    </CardHeader>
 
-                    <div className="overflow-x-auto">
-                        <table className="w-full">
-                            <thead className="bg-gray-50">
-                                <tr>
-                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Domain</th>
-                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Info</th>
-                                </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                                {results.map((result, index) => (
-                                    <tr key={index} className="hover:bg-gray-50">
-                                        <td className="px-6 py-4 whitespace-nowrap">
-                                            <div className="flex items-center">
-                                                {getStatusIcon(result.status)}
-                                            </div>
-                                        </td>
-                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                                            {result.fullName}
-                                        </td>
-                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                            {result.domain}
-                                        </td>
-                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
-                                            {result.email ? (
-                                                <span className="text-blue-600 font-medium">{result.email}</span>
-                                            ) : (
-                                                <span className="text-gray-400">-</span>
-                                            )}
-                                        </td>
-                                        <td className="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">
-                                            {result.debugInfo}
-                                        </td>
+                    <CardContent className="p-0">
+                        <div className="overflow-x-auto">
+                            <table className="w-full">
+                                <thead className="bg-muted/50 border-y border-border">
+                                    <tr>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider font-mono">Status</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider font-mono">Name</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider font-mono">Domain</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider font-mono">Email</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider font-mono">Debug Info</th>
                                     </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+                                </thead>
+                                <tbody className="divide-y divide-border">
+                                    {results.map((result, index) => (
+                                        <tr key={index} className="hover:bg-muted/30 transition-colors">
+                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                {getStatusBadge(result.status)}
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                                {result.fullName}
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-muted-foreground">
+                                                {result.domain}
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                {result.email ? (
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-primary font-medium font-mono">{result.email}</span>
+                                                        <CopyButton text={result.email} />
+                                                    </div>
+                                                ) : (
+                                                    <span className="text-muted-foreground">-</span>
+                                                )}
+                                            </td>
+                                            <td className="px-6 py-4 text-sm text-muted-foreground max-w-xs truncate font-mono">
+                                                {result.debugInfo}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </CardContent>
+                </Card>
             )}
         </div>
     );

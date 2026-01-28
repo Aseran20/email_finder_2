@@ -3,10 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
 import json
+import platform
+from datetime import datetime
 
-from models import EmailFinderRequest, EmailFinderResponse
+from models import EmailFinderRequest, CheckEmailRequest, EmailFinderResponse, BulkSearchJsonRequest
 from core.email_finder import EmailFinder
 from database import init_db, get_db, SearchHistory
+from config import config
 
 app = FastAPI(title="Email Finder MVP")
 
@@ -26,6 +29,55 @@ app.add_middleware(
 )
 
 finder = EmailFinder()
+
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for monitoring.
+    Returns system status, database connectivity, cache metrics, and version info.
+    """
+    try:
+        # Check database connectivity (simplified for now)
+        database_status = "ok"
+
+        # Get cache stats
+        cache_stats = finder.mx_cache.stats()
+
+        # System info
+        import sys
+        system_info = {
+            "platform": platform.system(),
+            "python": sys.version.split()[0]
+        }
+
+        # Overall health status
+        status = "healthy"
+
+        return {
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "database": database_status,
+            "cache": {
+                "hit_rate": cache_stats["hit_rate"],
+                "cached_domains": cache_stats["cached_domains"],
+                "hits": cache_stats["hits"],
+                "misses": cache_stats["misses"]
+            },
+            "version": config.APP_VERSION,
+            "config": {
+                "max_retries": config.SMTP_MAX_RETRIES,
+                "max_mx_servers": config.MAX_MX_SERVERS,
+                "rate_limit_delay": config.RATE_LIMIT_DELAY,
+                "mx_cache_ttl": config.MX_CACHE_TTL
+            },
+            "system": system_info
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "error": str(e)
+        }
 
 @app.post("/api/find-email", response_model=EmailFinderResponse)
 async def find_email(request: EmailFinderRequest, db: Session = Depends(get_db)):
@@ -61,6 +113,64 @@ async def find_email(request: EmailFinderRequest, db: Session = Depends(get_db))
             errorMessage=str(e),
             debugInfo="Internal Server Error"
         )
+
+@app.post("/api/check-email", response_model=EmailFinderResponse)
+async def check_email(request: CheckEmailRequest, db: Session = Depends(get_db)):
+    """
+    Check if a specific email address is valid.
+    If invalid and fullName is provided, fallback to domain search.
+
+    Args:
+        email: Email address to verify
+        fullName: Optional full name for fallback search
+
+    Returns:
+        EmailFinderResponse with validation result
+    """
+    if not request.email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    try:
+        result = finder.check_email(request.email, request.fullName)
+
+        # Save to database
+        # Extract domain from email for database record
+        domain = request.email.split('@')[1] if '@' in request.email else "unknown"
+
+        history_entry = SearchHistory(
+            domain=domain,
+            full_name=request.fullName or request.email,  # Use email if no name provided
+            status=result.status,
+            email=result.email,
+            catch_all=result.catchAll,
+            patterns_tested=json.dumps(result.patternsTested),
+            mx_records=json.dumps(result.mxRecords),
+            smtp_logs=json.dumps(result.smtpLogs),
+            debug_info=result.debugInfo,
+            error_message=result.errorMessage
+        )
+        db.add(history_entry)
+        db.commit()
+
+        # Add 1s delay to respect rate limiting (same as find-email)
+        import time
+        time.sleep(1)
+
+        return result
+    except Exception as e:
+        return EmailFinderResponse(
+            status="error",
+            errorMessage=str(e),
+            debugInfo="Internal Server Error"
+        )
+
+@app.get("/api/cache/stats")
+async def get_cache_stats():
+    """
+    Get MX cache statistics.
+    Returns hit rate and cached domains count.
+    """
+    return finder.mx_cache.stats()
 
 @app.get("/api/history")
 async def get_history(limit: int = 50, db: Session = Depends(get_db)):
@@ -217,6 +327,102 @@ async def bulk_search(file: UploadFile = File(...), db: Session = Depends(get_db
         
         return {"total": len(results), "results": results}
         
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bulk search error: {str(e)}")
+
+@app.post("/api/bulk-search-json")
+async def bulk_search_json(request: BulkSearchJsonRequest, db: Session = Depends(get_db)):
+    """
+    Bulk email search from JSON (paste from spreadsheet).
+    Accepts list of {domain, fullName} objects.
+    Returns list of search results.
+    """
+    import time
+
+    try:
+        results = []
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 5  # Stop if 5 errors in a row (possible ban)
+
+        # Process each search with 1s delay (CRITICAL: Politeness to avoid bans)
+        for search in request.searches:
+            domain = search.domain.strip()
+            full_name = search.fullName.strip()
+
+            # Skip empty entries
+            if not domain or not full_name:
+                continue
+
+            try:
+                # Perform email search
+                result = finder.find_email(domain, full_name)
+
+                # Reset error counter on success
+                consecutive_errors = 0
+
+                # Save to database
+                history_entry = SearchHistory(
+                    domain=domain,
+                    full_name=full_name,
+                    status=result.status,
+                    email=result.email,
+                    catch_all=result.catchAll,
+                    patterns_tested=json.dumps(result.patternsTested),
+                    mx_records=json.dumps(result.mxRecords),
+                    smtp_logs=json.dumps(result.smtpLogs),
+                    debug_info=result.debugInfo,
+                    error_message=result.errorMessage
+                )
+                db.add(history_entry)
+                db.commit()
+
+                # Add to results
+                results.append({
+                    "domain": domain,
+                    "fullName": full_name,
+                    "status": result.status,
+                    "email": result.email,
+                    "catchAll": result.catchAll,
+                    "debugInfo": result.debugInfo
+                })
+
+            except Exception as e:
+                # Robust error handling - log error but CONTINUE
+                consecutive_errors += 1
+                error_msg = str(e)
+
+                # Check for ban indicators
+                if "blocked" in error_msg.lower() or "access denied" in error_msg.lower():
+                    error_msg = f"⚠️ Possible ban detected: {error_msg}"
+
+                results.append({
+                    "domain": domain,
+                    "fullName": full_name,
+                    "status": "error",
+                    "email": None,
+                    "catchAll": False,
+                    "debugInfo": f"Error: {error_msg}"
+                })
+
+                # SAFETY: Stop if too many consecutive errors (likely ban or network issue)
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    results.append({
+                        "domain": "STOPPED",
+                        "fullName": "Processing halted",
+                        "status": "error",
+                        "email": None,
+                        "catchAll": False,
+                        "debugInfo": f"⛔ Stopped after {MAX_CONSECUTIVE_ERRORS} consecutive errors (possible ban or network issue)"
+                    })
+                    break
+
+            finally:
+                # CRITICAL: Always sleep 1s between checks, even on error
+                # This is the PRIMARY anti-ban mechanism
+                time.sleep(1)
+
+        return {"total": len(results), "results": results}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bulk search error: {str(e)}")
 
